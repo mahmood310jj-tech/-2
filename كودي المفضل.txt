@@ -1,0 +1,1026 @@
+// ignore_for_file: deprecated_member_use, curly_braces_in_flow_control_structures, use_build_context_synchronously, prefer_const_constructors, prefer_const_literals_to_create_immutables, depend_on_referenced_packages
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:image_picker/image_picker.dart';
+
+final supabase = Supabase.instance.client;
+
+const Color bgColor = Color(0xFFFFF8EC);
+const Color mainGreen = Color(0xFF5A8A5A);
+const Color darkGreen = Color(0xFF2F4A2F);
+
+Future<T> withRetry<T>(Future<T> Function() fn) async {
+  for (int i = 0; i < 3; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      if (i == 2) rethrow;
+      await Future.delayed(const Duration(seconds: 2));
+    }
+  }
+  throw Exception('فشل الاتصال');
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Supabase.initialize(
+    url: 'https://ixecfbrhntbbgqyexyff.supabase.co',
+    anonKey: 'sb_publishable_XHQnRNzCaWONgbO_qZ4wfg_M2AKBvaP',
+  );
+  runApp(const MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'مدرسة المصطفى',
+      theme: ThemeData(primaryColor: mainGreen, scaffoldBackgroundColor: bgColor),
+      home: const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
+  @override
+  State<AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<AuthGate> {
+  @override
+  Widget build(BuildContext context) {
+    final user = supabase.auth.currentUser;
+    if (user == null) return const LoginPage();
+    return const HomePage();
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final emailCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  String msg = '';
+  bool loading = false;
+  Future<void> login() async {
+    setState(() {
+      loading = true;
+      msg = '';
+    });
+    try {
+      await withRetry(() => supabase.auth.signInWithPassword(email: emailCtrl.text.trim(), password: passCtrl.text.trim()));
+      if (!mounted) return;
+      Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomePage()));
+    } catch (e) {
+      if (mounted) setState(() => msg = 'فشل الدخول: $e');
+    }
+    if (mounted) setState(() => loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const SizedBox(height: 60),
+            const Text('مرحباً بكم في مدرسة المصطفى', textAlign: TextAlign.center, style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: darkGreen)),
+            const Text('مدرستنا .. بيت العلم والإبداع', style: TextStyle(color: Colors.grey, fontSize: 14)),
+            const SizedBox(height: 28),
+            TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'البريد الإلكتروني', prefixIcon: Icon(Icons.email, color: mainGreen), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(16))), filled: true, fillColor: Colors.white)),
+            const SizedBox(height: 14),
+            TextField(controller: passCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور', prefixIcon: Icon(Icons.lock, color: mainGreen), border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(16))), filled: true, fillColor: Colors.white)),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              height: 55,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: mainGreen, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
+                onPressed: loading ? null : login,
+                child: Text(loading ? 'جارٍ الدخول...' : 'دخول', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextButton(onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomePage(isGuest: true))), child: const Text('دخول كضيف بدون حساب', style: TextStyle(color: mainGreen, fontWeight: FontWeight.bold))),
+            TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CreateUserPage())), child: const Text('إنشاء حساب طالب جديد', style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold))),
+            if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(msg, textAlign: TextAlign.center, style: const TextStyle(color: Colors.red))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  final bool isGuest;
+  const HomePage({super.key, this.isGuest = false});
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String role = 'guest';
+  String fullName = 'ضيف';
+  List announcements = [];
+  List galleryImages = [];
+  int studentsCount = 0;
+  int teachersCount = 0;
+  int bottomIndex = 0;
+  DateTime selectedDate = DateTime.now();
+
+  @override
+  void initState() {
+    super.initState();
+    loadAll();
+  }
+
+  Future<void> loadAll() async {
+    if (!widget.isGuest) {
+      try {
+        final p = await withRetry(() => supabase.from('profiles').select('full_name, role').eq('id', supabase.auth.currentUser!.id).single());
+        if (mounted) setState(() {
+          fullName = p['full_name'] ?? 'مستخدم';
+          role = p['role'] ?? 'guest';
+        });
+      } catch (_) {}
+    } else {
+      if (mounted) setState(() {
+        role = 'guest';
+        fullName = 'ضيف';
+      });
+    }
+    try {
+      final ann = await withRetry(() => supabase.from('announcements').select('id, title, body, image_url, created_at').order('created_at', ascending: false).limit(10));
+      if (mounted) setState(() {
+        announcements = ann;
+        galleryImages = ann.where((e) => (e['image_url'] ?? '').toString().isNotEmpty).toList();
+      });
+    } catch (_) {}
+    try {
+      final s = await withRetry(() => supabase.from('students').select('id'));
+      final t = await withRetry(() => supabase.from('teachers').select('id'));
+      if (mounted) setState(() {
+        studentsCount = s.length;
+        teachersCount = t.length;
+      });
+    } catch (_) {}
+  }
+
+  Widget buildAnnouncements() {
+    if (announcements.isEmpty) {
+      return Container(
+        margin: const EdgeInsets.symmetric(horizontal: 16),
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+        child: const Text('لا توجد إعلانات بعد', style: TextStyle(fontWeight: FontWeight.bold)),
+      );
+    }
+    return Column(
+      children: announcements.take(3).map((a) {
+        return Container(
+          width: double.infinity,
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              const Text('إعلان مدرسي', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 6),
+              Text(a['title'] ?? '', textAlign: TextAlign.right, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: darkGreen)),
+              const SizedBox(height: 4),
+              Text(a['body'] ?? '', textAlign: TextAlign.right, style: const TextStyle(color: Colors.grey, fontSize: 13)),
+              if ((a['image_url'] ?? '').toString().isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.network(a['image_url'], height: 160, width: double.infinity, fit: BoxFit.cover),
+                  ),
+                ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      bottomNavigationBar: Container(
+        decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.only(topLeft: Radius.circular(24), topRight: Radius.circular(24))),
+        child: BottomNavigationBar(
+          currentIndex: bottomIndex,
+          selectedItemColor: Colors.blue,
+          unselectedItemColor: Colors.grey,
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          type: BottomNavigationBarType.fixed,
+          onTap: (i) {
+            setState(() => bottomIndex = i);
+            if (i == 1) Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الواجبات', isGuest: widget.isGuest)));
+            if (i == 2) Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الامتحانات', isGuest: widget.isGuest)));
+            if (i == 3) Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatPage()));
+          },
+          items: const [
+            BottomNavigationBarItem(icon: Icon(Icons.home), label: 'الرئيسية'),
+            BottomNavigationBarItem(icon: Icon(Icons.book), label: 'الدروس'),
+            BottomNavigationBarItem(icon: Icon(Icons.quiz), label: 'الاختبارات'),
+            BottomNavigationBarItem(icon: Icon(Icons.person), label: 'الحساب'),
+          ],
+        ),
+      ),
+      floatingActionButton: (role == 'admin' && !widget.isGuest)
+          ? FloatingActionButton(backgroundColor: mainGreen, onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CreateUserPage())), child: const Icon(Icons.add, color: Colors.white))
+          : null,
+      body: SingleChildScrollView(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 45, 16, 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: const Row(children: [Icon(Icons.language, size: 14, color: mainGreen), SizedBox(width: 4), Text('العربية', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold))])),
+                      const SizedBox(width: 8),
+                      Container(padding: const EdgeInsets.all(8), decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle), child: const Icon(Icons.settings, size: 18, color: darkGreen)),
+                    ],
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      const Text('الرئيسية', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: darkGreen)),
+                      Text('مرحباً بك، $fullName', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(color: Colors.red.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.red.withValues(alpha: 0.2))),
+              child: Row(
+                children: [
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)), child: const Text('عاجل', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold))),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Text(
+                        announcements.isEmpty ? 'أهلاً بكم في مدرسة المصطفى .. بدء التسجيل للعام الدراسي الجديد 2026 - 2027' : announcements.map((e) => e['title']).join('  •  '),
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: darkGreen),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFFFFE8D6), Color(0xFFFFF3E0)]), borderRadius: BorderRadius.circular(24)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: const Text('مدرسة المصطفى', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold))),
+                  const SizedBox(height: 8),
+                  const Text('تعلم بسهولة', textAlign: TextAlign.right, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: darkGreen)),
+                  const Text('دروس يومية للمحادثة والمفردات والقواعد خطوة بخطوة', textAlign: TextAlign.right, style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5)),
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.orange, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+                    onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الواجبات', isGuest: widget.isGuest))),
+                    icon: const Icon(Icons.play_arrow, color: Colors.white, size: 18),
+                    label: const Text('متابعة آخر درس', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+              child: Column(
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CalendarPage())), child: const Text('عرض التقويم الكامل', style: TextStyle(color: mainGreen, fontSize: 12))),
+                      Text('التقويم - ${selectedDate.day} / ${selectedDate.month} / ${selectedDate.year}', style: const TextStyle(fontWeight: FontWeight.bold, color: darkGreen)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: List.generate(7, (i) {
+                      final d = DateTime.now().add(Duration(days: i - 3));
+                      final isToday = d.day == DateTime.now().day;
+                      return Container(
+                        width: 40,
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        decoration: BoxDecoration(color: isToday ? mainGreen : const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(12)),
+                        child: Column(children: [Text('${d.day}', style: TextStyle(fontWeight: FontWeight.bold, color: isToday ? Colors.white : darkGreen)), Text('يوم', style: TextStyle(fontSize: 9, color: isToday ? Colors.white : Colors.grey))]),
+                      );
+                    }),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text('أقسام التعلم', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: darkGreen)), Text('اختر ما تريد تعلمه اليوم', style: TextStyle(fontSize: 12, color: Colors.grey))])),
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: GridView.count(
+                crossAxisCount: 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 12,
+                crossAxisSpacing: 12,
+                childAspectRatio: 1.25,
+                children: [
+                  _colorCard('الاستماع', 'محادثات يومية\nنطق الكلمات', 'استمع', Colors.green, const Color(0xFFDFF3E0), Icons.headphones, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الواجبات', isGuest: widget.isGuest)))),
+                  _colorCard('الدروس', 'دروس المبتدئين\nقواعد اللغة', 'ابدأ', Colors.blue, const Color(0xFFDDEEFF), Icons.book, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الواجبات', isGuest: widget.isGuest)))),
+                  _colorCard('الكلمات المفضلة', 'الكلمات المحفوظة', 'عرض', Colors.pink, const Color(0xFFFFDDE5), Icons.star, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الدرجات', isGuest: widget.isGuest)))),
+                  _colorCard('الاختبارات', 'اختبارات المفردات\nتقييم المستوى', 'اختبر نفسك', Colors.orange, const Color(0xFFFFE8D0), Icons.quiz, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الامتحانات', isGuest: widget.isGuest)))),
+                  _colorCard('الإنجازات', 'عدد الدروس المكتملة', 'عرض الإنجازات', Colors.amber, const Color(0xFFFFF3C4), Icons.emoji_events, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'التقارير', isGuest: widget.isGuest)))),
+                  _colorCard('القاموس', 'ترجمة الكلمات', 'فتح', Colors.purple, const Color(0xFFE8DFFF), Icons.book_online, () => Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الجدول', isGuest: widget.isGuest)))),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => GalleryPage(images: galleryImages, isGuest: widget.isGuest))), child: const Text('عرض الكل', style: TextStyle(color: mainGreen))),
+                  const Text('معرض صور المدرسة', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: darkGreen)),
+                ],
+              ),
+            ),
+            if (galleryImages.isEmpty)
+              Container(margin: const EdgeInsets.symmetric(horizontal: 16), padding: const EdgeInsets.all(18), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: const Column(children: [Icon(Icons.photo_library, color: mainGreen, size: 32), SizedBox(height: 8), Text('لا توجد صور بعد - انشر أول صورة من الواجبات أو الإعلانات', textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 12))]))
+            else
+              SizedBox(
+                height: 110,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: galleryImages.length,
+                  itemBuilder: (_, i) => Container(margin: const EdgeInsets.only(left: 10), width: 150, decoration: BoxDecoration(borderRadius: BorderRadius.circular(16)), child: ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.network(galleryImages[i]['image_url'], fit: BoxFit.cover, errorBuilder: (_, __, ___) => Container(color: Colors.grey[200], child: const Icon(Icons.image))))),
+                ),
+              ),
+            const SizedBox(height: 16),
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(20)),
+              child: Row(
+                children: [
+                  ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: mainGreen, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))), onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChatPage())), child: const Text('دردشة الآن', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                  const SizedBox(width: 12),
+                  const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text('دردشة مع المعلم', style: TextStyle(fontWeight: FontWeight.bold, color: darkGreen)), Text('اسأل معلمك مباشرة عن أي درس', style: TextStyle(fontSize: 12, color: Colors.grey))])),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton(onPressed: () async { await Navigator.push(context, MaterialPageRoute(builder: (_) => SectionPage(title: 'الإعلانات', isGuest: widget.isGuest))); loadAll(); }, child: const Text('عرض الكل', style: TextStyle(color: mainGreen))),
+                  const Text('أخبار وإعلانات المدرسة', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: darkGreen)),
+                ],
+              ),
+            ),
+            buildAnnouncements(),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _colorCard(String title, String desc, String btn, Color color, Color bg, IconData icon, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(20)),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Container(padding: const EdgeInsets.all(8), decoration: BoxDecoration(color: color, shape: BoxShape.circle), child: Icon(icon, color: Colors.white, size: 20)), Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: darkGreen))]),
+            const SizedBox(height: 8),
+            Text(desc, textAlign: TextAlign.right, style: const TextStyle(fontSize: 11, color: Colors.black54, height: 1.4)),
+            const Spacer(),
+            Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6), decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(20)), child: Text(btn, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class CalendarPage extends StatefulWidget {
+  const CalendarPage({super.key});
+  @override
+  State<CalendarPage> createState() => _CalendarPageState();
+}
+
+class _CalendarPageState extends State<CalendarPage> {
+  DateTime now = DateTime.now();
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Text('التقويم'), backgroundColor: bgColor),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)),
+              child: Column(
+                children: [
+                  Text('${now.month} / ${now.year}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 7),
+                    itemCount: 30,
+                    itemBuilder: (_, i) {
+                      final day = i + 1;
+                      final isToday = day == now.day;
+                      return Container(margin: const EdgeInsets.all(3), decoration: BoxDecoration(color: isToday ? mainGreen : const Color(0xFFF5F5F5), borderRadius: BorderRadius.circular(10)), child: Center(child: Text('$day', style: TextStyle(fontWeight: FontWeight.bold, color: isToday ? Colors.white : darkGreen))));
+                    },
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(width: double.infinity, padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20)), child: const Column(crossAxisAlignment: CrossAxisAlignment.end, children: [Text('مناسبات هذا الشهر', style: TextStyle(fontWeight: FontWeight.bold)), SizedBox(height: 8), Text('بدء الامتحانات\nعطلة نهاية الأسبوع\nنشاط المدرسة الأسبوعي', style: TextStyle(color: Colors.grey, height: 1.6))])),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class GalleryPage extends StatelessWidget {
+  final List images;
+  final bool isGuest;
+  const GalleryPage({super.key, required this.images, this.isGuest = false});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Text('معرض صور المدرسة'), backgroundColor: bgColor),
+      floatingActionButton: isGuest ? null : FloatingActionButton(backgroundColor: mainGreen, onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AddItemPage(title: 'الإعلانات', table: 'announcements'))), child: const Icon(Icons.add_a_photo, color: Colors.white)),
+      body: images.isEmpty ? const Center(child: Text('لا توجد صور بعد\nانشر صورة من الإعلانات أو الواجبات', textAlign: TextAlign.center)) : GridView.builder(padding: const EdgeInsets.all(12), gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10), itemCount: images.length, itemBuilder: (_, i) => ClipRRect(borderRadius: BorderRadius.circular(16), child: Image.network(images[i]['image_url'], fit: BoxFit.cover))),
+    );
+  }
+}
+
+class ChatPage extends StatefulWidget {
+  const ChatPage({super.key});
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  final msgCtrl = TextEditingController();
+  List<Map<String, dynamic>> messages = [
+    {'text': 'أهلاً بك في دردشة المدرسة', 'isMe': false},
+    {'text': 'اسأل معلمك عن أي درس أو واجب', 'isMe': false},
+  ];
+  void send() {
+    if (msgCtrl.text.trim().isEmpty) return;
+    setState(() {
+      messages.add({'text': msgCtrl.text.trim(), 'isMe': true});
+      msgCtrl.clear();
+    });
+    Future.delayed(const Duration(seconds: 1), () {
+      if (mounted) setState(() => messages.add({'text': 'تم استلام رسالتك، سيرد عليك المعلم قريباً', 'isMe': false}));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Row(children: [CircleAvatar(backgroundColor: Colors.white, child: Text('👨‍🏫')), SizedBox(width: 8), Text('دردشة مع المعلم')]), backgroundColor: bgColor),
+      body: Column(
+        children: [
+          Expanded(child: ListView.builder(padding: const EdgeInsets.all(12), itemCount: messages.length, itemBuilder: (_, i) { final m = messages[i]; final isMe = m['isMe'] as bool; return Align(alignment: isMe ? Alignment.centerLeft : Alignment.centerRight, child: Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10), decoration: BoxDecoration(color: isMe ? mainGreen : Colors.white, borderRadius: BorderRadius.circular(16)), child: Text(m['text'], style: TextStyle(color: isMe ? Colors.white : Colors.black)))); })),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(children: [IconButton(icon: const Icon(Icons.send, color: mainGreen), onPressed: send), Expanded(child: TextField(controller: msgCtrl, decoration: const InputDecoration(hintText: 'اكتب رسالتك للمعلم...', filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(20))))))]),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CreateUserPage extends StatefulWidget {
+  const CreateUserPage({super.key});
+  @override
+  State<CreateUserPage> createState() => _CreateUserPageState();
+}
+
+class _CreateUserPageState extends State<CreateUserPage> {
+  final emailCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  final nameCtrl = TextEditingController();
+  String role = 'student';
+  String msg = '';
+  Future<void> create() async {
+    try {
+      final res = await supabase.auth.signUp(email: emailCtrl.text.trim(), password: passCtrl.text.trim());
+      final uid = res.user?.id;
+      if (uid != null) {
+        await supabase.from('profiles').insert({'id': uid, 'full_name': nameCtrl.text.trim(), 'role': role, 'school_id': 'fbf0b515-60f6-4b77-b6e3-238ece1d0883'});
+      }
+      if (mounted) setState(() => msg = 'تم إنشاء حساب $role بنجاح');
+    } catch (e) {
+      if (mounted) setState(() => msg = 'خطأ: $e');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('إنشاء حساب جديد')),
+      body: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'الاسم الكامل')),
+            TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: 'البريد')),
+            TextField(controller: passCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'كلمة المرور')),
+            DropdownButton<String>(value: role, items: const [DropdownMenuItem(value: 'student', child: Text('طالب')), DropdownMenuItem(value: 'teacher', child: Text('معلم')), DropdownMenuItem(value: 'admin', child: Text('مدير'))], onChanged: (v) => setState(() => role = v!)),
+            ElevatedButton(onPressed: create, child: const Text('إنشاء')),
+            Text(msg),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class GenericListPage extends StatefulWidget {
+  final String title;
+  final String table;
+  final String titleField;
+  final String subField;
+  final IconData icon;
+  final bool isGuest;
+  const GenericListPage({super.key, required this.title, required this.table, required this.titleField, required this.subField, required this.icon, this.isGuest = false});
+  @override
+  State<GenericListPage> createState() => _GenericListPageState();
+}
+
+class _GenericListPageState extends State<GenericListPage> {
+  List items = [];
+  String msg = 'جارٍ التحميل...';
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final data = await withRetry(() => supabase.from(widget.table).select('*').order('created_at', ascending: false).limit(50));
+      if (mounted) setState(() {
+        items = data;
+        msg = items.isEmpty ? 'لا توجد بيانات بعد في ${widget.title}.' : '';
+      });
+    } catch (e) {
+      if (mounted) setState(() => msg = 'لا توجد بيانات بعد أو الجدول غير موجود.');
+    }
+  }
+
+  Future<void> deleteItem(dynamic it) async {
+    if (widget.isGuest) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('الضيف لا يمكنه الحذف')));
+      return;
+    }
+    final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: const Text('حذف؟'), content: const Text('هل تريد حذف هذا المنشور نهائياً؟'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('لا')), TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('نعم، احذف', style: TextStyle(color: Colors.red)))]));
+    if (ok == true) {
+      try {
+        await supabase.from(widget.table).delete().eq('id', it['id']);
+        load();
+      } catch (e) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('فشل الحذف: $e')));
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: Text(widget.title), backgroundColor: bgColor, actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: load)]),
+      floatingActionButton: widget.isGuest ? null : FloatingActionButton(backgroundColor: mainGreen, onPressed: () async { final ok = await Navigator.push(context, MaterialPageRoute(builder: (_) => AddItemPage(title: widget.title, table: widget.table))); if (ok == true) load(); }, child: const Icon(Icons.add, color: Colors.white)),
+      body: items.isEmpty
+          ? Center(child: Padding(padding: const EdgeInsets.all(20), child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [Icon(widget.icon, size: 60, color: mainGreen), const SizedBox(height: 12), Text(msg, textAlign: TextAlign.center), const SizedBox(height: 12), ElevatedButton(onPressed: load, child: const Text('إعادة المحاولة'))])))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: items.length,
+              itemBuilder: (_, i) {
+                final it = items[i];
+                final titleVal = (it[widget.titleField] ?? it['title'] ?? it['full_name'] ?? it['name'] ?? 'بدون عنوان').toString();
+                final subVal = (it[widget.subField] ?? it['body'] ?? it['description'] ?? it['status'] ?? '').toString();
+                final img = (it['image_url'] ?? '').toString();
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          CircleAvatar(backgroundColor: const Color(0xFFE8F0E8), child: Icon(widget.icon, color: mainGreen, size: 20)),
+                          const SizedBox(width: 12),
+                          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(titleVal, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), if (subVal.isNotEmpty) Text(subVal, style: const TextStyle(color: Colors.grey, fontSize: 12), maxLines: 2, overflow: TextOverflow.ellipsis)])),
+                          if (!widget.isGuest) IconButton(icon: const Icon(Icons.delete, color: Colors.red, size: 22), onPressed: () => deleteItem(it)),
+                        ],
+                      ),
+                      if (img.isNotEmpty && img.startsWith('http'))
+                        Padding(padding: const EdgeInsets.only(top: 12), child: ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.network(img, width: double.infinity, height: 200, fit: BoxFit.cover, errorBuilder: (_, __, ___) => const SizedBox()))),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+class AddItemPage extends StatefulWidget {
+  final String title;
+  final String table;
+  const AddItemPage({super.key, required this.title, required this.table});
+  @override
+  State<AddItemPage> createState() => _AddItemPageState();
+}
+
+class _AddItemPageState extends State<AddItemPage> {
+  final f1 = TextEditingController();
+  final f2 = TextEditingController();
+  final f3 = TextEditingController();
+  String msg = '';
+  bool loading = false;
+  File? pickedImage;
+
+  String get label1 {
+    if (widget.table == 'grades') return 'اسم الطالب';
+    if (widget.table == 'attendance') return 'اسم الطالب';
+    return 'العنوان';
+  }
+
+  String get label2 {
+    if (widget.table == 'grades') return 'المادة';
+    if (widget.table == 'attendance') return 'الحالة (حاضر / غائب)';
+    if (widget.table == 'announcements') return 'نص الإعلان';
+    return 'الوصف / التفاصيل';
+  }
+
+  String get label3 {
+    if (widget.table == 'grades') return 'الدرجة';
+    if (widget.table == 'attendance') return 'التاريخ';
+    return '';
+  }
+
+  bool get showImageButton => widget.table == 'homework' || widget.table == 'announcements' || widget.table == 'exams' || widget.table == 'schedule';
+
+  Future<void> pickImage() async {
+    try {
+      final XFile? x = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 70);
+      if (x != null) setState(() => pickedImage = File(x.path));
+    } catch (e) {
+      if (mounted) setState(() => msg = 'فشل اختيار الصورة: $e');
+    }
+  }
+
+  Future<String?> uploadImage() async {
+    if (pickedImage == null) return null;
+    try {
+      final name = 'img_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await supabase.storage.from('homework-images').upload(name, pickedImage!);
+      return supabase.storage.from('homework-images').getPublicUrl(name);
+    } catch (e) {
+      if (mounted) setState(() => msg = 'فشل رفع الصورة: $e');
+      return null;
+    }
+  }
+
+  Future<void> publish() async {
+    setState(() {
+      loading = true;
+      msg = '';
+    });
+    try {
+      Map<String, dynamic> data = {'school_id': 'fbf0b515-60f6-4b77-b6e3-238ece1d0883'};
+      if (widget.table == 'announcements') {
+        data['title'] = f1.text.trim();
+        data['body'] = f2.text.trim();
+      } else if (widget.table == 'homework') {
+        data['title'] = f1.text.trim();
+        data['description'] = f2.text.trim();
+      } else if (widget.table == 'grades') {
+        data['title'] = '${f1.text.trim()} - ${f2.text.trim()}';
+        data['description'] = 'الدرجة: ${f3.text.trim()}';
+      } else if (widget.table == 'attendance') {
+        data['title'] = f1.text.trim();
+        data['description'] = 'الحالة: ${f2.text.trim()} - التاريخ: ${f3.text.trim()}';
+      } else {
+        data['title'] = f1.text.trim();
+        data['description'] = f2.text.trim();
+      }
+      final imgUrl = await uploadImage();
+      if (imgUrl != null) data['image_url'] = imgUrl;
+      await supabase.from(widget.table).insert(data);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (mounted) setState(() => msg = 'فشل النشر: $e');
+    }
+    if (mounted) setState(() => loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: Text('نشر في ${widget.title}'), backgroundColor: bgColor),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            TextField(controller: f1, decoration: InputDecoration(labelText: label1, filled: true, fillColor: Colors.white, border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))))),
+            const SizedBox(height: 12),
+            TextField(controller: f2, maxLines: widget.table == 'announcements' ? 4 : 1, decoration: InputDecoration(labelText: label2, filled: true, fillColor: Colors.white, border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))))),
+            if (label3.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              TextField(controller: f3, decoration: InputDecoration(labelText: label3, filled: true, fillColor: Colors.white, border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))))),
+            ],
+            if (showImageButton) ...[
+              const SizedBox(height: 16),
+              if (pickedImage != null) ClipRRect(borderRadius: BorderRadius.circular(12), child: Image.file(pickedImage!, height: 200, width: double.infinity, fit: BoxFit.cover)),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: OutlinedButton.icon(style: OutlinedButton.styleFrom(side: const BorderSide(color: mainGreen), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))), onPressed: pickImage, icon: const Icon(Icons.photo, color: mainGreen), label: Text(pickedImage == null ? 'اختر صورة من الهاتف - للنشر في المعرض' : 'تغيير الصورة', style: const TextStyle(color: mainGreen, fontWeight: FontWeight.bold))),
+              ),
+            ],
+            const SizedBox(height: 20),
+            SizedBox(width: double.infinity, height: 50, child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: mainGreen, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))), onPressed: loading ? null : publish, child: Text(loading ? 'جارٍ الرفع والنشر...' : 'نشر الآن', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)))),
+            if (msg.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 12), child: Text(msg, textAlign: TextAlign.center, style: const TextStyle(color: Colors.red))),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class SectionPage extends StatelessWidget {
+  final String title;
+  final bool isGuest;
+  const SectionPage({super.key, required this.title, this.isGuest = false});
+  @override
+  Widget build(BuildContext context) {
+    if (title == 'الطلاب') return StudentsPage(isGuest: isGuest);
+    if (title == 'المعلمون') return TeachersPage(isGuest: isGuest);
+    if (title == 'الصفوف') return SectionsPage(isGuest: isGuest);
+    if (title == 'الحضور') return GenericListPage(title: 'الحضور', table: 'attendance', titleField: 'status', subField: 'date', icon: Icons.check_circle, isGuest: isGuest);
+    if (title == 'الدرجات') return GenericListPage(title: 'الدرجات', table: 'grades', titleField: 'grade', subField: 'subject', icon: Icons.grade, isGuest: isGuest);
+    if (title == 'الواجبات') return GenericListPage(title: 'الواجبات', table: 'homework', titleField: 'title', subField: 'description', icon: Icons.book, isGuest: isGuest);
+    if (title == 'الجدول') return GenericListPage(title: 'الجدول', table: 'schedule', titleField: 'subject', subField: 'day', icon: Icons.schedule, isGuest: isGuest);
+    if (title == 'الامتحانات') return GenericListPage(title: 'الامتحانات', table: 'exams', titleField: 'title', subField: 'date', icon: Icons.quiz, isGuest: isGuest);
+    if (title == 'الإعلانات') return GenericListPage(title: 'الإعلانات', table: 'announcements', titleField: 'title', subField: 'body', icon: Icons.announcement, isGuest: isGuest);
+    if (title == 'أولياء الأمور') return GenericListPage(title: 'أولياء الأمور', table: 'parents', titleField: 'full_name', subField: 'phone', icon: Icons.family_restroom, isGuest: isGuest);
+    if (title == 'التقارير') return GenericListPage(title: 'التقارير', table: 'reports', titleField: 'title', subField: 'description', icon: Icons.bar_chart, isGuest: isGuest);
+    if (title == 'الأقساط') return GenericListPage(title: 'الأقساط', table: 'installments', titleField: 'amount', subField: 'status', icon: Icons.payments, isGuest: isGuest);
+    return Scaffold(backgroundColor: bgColor, appBar: AppBar(title: Text(title), backgroundColor: bgColor), body: Center(child: Text('قسم $title')));
+  }
+}
+
+class StudentsPage extends StatefulWidget {
+  final bool isGuest;
+  const StudentsPage({super.key, this.isGuest = false});
+  @override
+  State<StudentsPage> createState() => _StudentsPageState();
+}
+
+class _StudentsPageState extends State<StudentsPage> {
+  List students = [];
+  String msg = 'جارٍ التحميل...';
+  @override
+  void initState() {
+    super.initState();
+    loadStudents();
+  }
+
+  Future<void> loadStudents() async {
+    try {
+      final data = await withRetry(() => supabase.from('students').select('id, student_number, full_name, gender, address, is_active').order('created_at'));
+      if (mounted) setState(() {
+        students = data;
+        msg = students.isEmpty ? 'لا يوجد طلاب بعد.' : '';
+      });
+    } catch (e) {
+      if (mounted) setState(() => msg = 'الشبكة ضعيفة. اضغط إعادة المحاولة.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Text('الطلاب'), backgroundColor: bgColor, actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: loadStudents)]),
+      body: students.isEmpty
+          ? Center(child: Text(msg))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: students.length,
+              itemBuilder: (_, i) {
+                final s = students[i];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+                  child: Row(
+                    children: [
+                      CircleAvatar(backgroundColor: const Color(0xFFE8F0E8), child: Text('${s['student_number'] ?? ''}', style: const TextStyle(color: mainGreen, fontWeight: FontWeight.bold, fontSize: 12))),
+                      const SizedBox(width: 12),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(s['full_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)), Text('${s['gender'] ?? ''} - ${s['address'] ?? ''}', style: const TextStyle(color: Colors.grey, fontSize: 12))])),
+                      if (!widget.isGuest)
+                        IconButton(
+                          icon: const Icon(Icons.delete, color: Colors.red),
+                          onPressed: () async {
+                            final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: const Text('حذف؟'), content: const Text('هل تريد حذف هذا الطالب؟'), actions: [TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('لا')), TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('نعم، احذف', style: TextStyle(color: Colors.red)))]));
+                            if (ok == true) {
+                              await supabase.from('students').delete().eq('id', s['id']);
+                              loadStudents();
+                            }
+                          },
+                        ),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+class TeachersPage extends StatefulWidget {
+  final bool isGuest;
+  const TeachersPage({super.key, this.isGuest = false});
+  @override
+  State<TeachersPage> createState() => _TeachersPageState();
+}
+
+class _TeachersPageState extends State<TeachersPage> {
+  List teachers = [];
+  String msg = 'جارٍ التحميل...';
+  @override
+  void initState() {
+    super.initState();
+    loadTeachers();
+  }
+
+  Future<void> loadTeachers() async {
+    try {
+      final data = await withRetry(() => supabase.from('teachers').select('id, full_name, specialization, phone').order('created_at'));
+      if (mounted) setState(() {
+        teachers = data;
+        msg = teachers.isEmpty ? 'لا يوجد معلمون بعد.' : '';
+      });
+    } catch (e) {
+      if (mounted) setState(() => msg = 'الشبكة ضعيفة.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Text('المعلمون'), backgroundColor: bgColor),
+      body: teachers.isEmpty
+          ? Center(child: Text(msg))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: teachers.length,
+              itemBuilder: (_, i) {
+                final t = teachers[i];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+                  child: Row(
+                    children: [
+                      const CircleAvatar(backgroundColor: Color(0xFFE8F0E8), child: Icon(Icons.person, color: mainGreen)),
+                      const SizedBox(width: 12),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(t['full_name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold)), Text('${t['specialization'] ?? ''} - ${t['phone'] ?? ''}', style: const TextStyle(color: Colors.grey, fontSize: 12))])),
+                      if (!widget.isGuest)
+                        IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () async {
+                          await supabase.from('teachers').delete().eq('id', t['id']);
+                          loadTeachers();
+                        }),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+class SectionsPage extends StatefulWidget {
+  final bool isGuest;
+  const SectionsPage({super.key, this.isGuest = false});
+  @override
+  State<SectionsPage> createState() => _SectionsPageState();
+}
+
+class _SectionsPageState extends State<SectionsPage> {
+  List sections = [];
+  String msg = 'جارٍ التحميل...';
+  @override
+  void initState() {
+    super.initState();
+    loadSections();
+  }
+
+  Future<void> loadSections() async {
+    try {
+      final data = await withRetry(() => supabase.from('sections').select('id, name, capacity').order('created_at'));
+      if (mounted) setState(() {
+        sections = data;
+        msg = sections.isEmpty ? 'لا توجد صفوف بعد.' : '';
+      });
+    } catch (e) {
+      if (mounted) setState(() => msg = 'الشبكة ضعيفة.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: bgColor,
+      appBar: AppBar(title: const Text('الصفوف'), backgroundColor: bgColor),
+      body: sections.isEmpty
+          ? Center(child: Text(msg))
+          : ListView.builder(
+              padding: const EdgeInsets.all(12),
+              itemCount: sections.length,
+              itemBuilder: (_, i) {
+                final s = sections[i];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14)),
+                  child: Row(
+                    children: [
+                      const CircleAvatar(backgroundColor: Color(0xFFE8F0E8), child: Icon(Icons.class_, color: mainGreen)),
+                      const SizedBox(width: 12),
+                      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(s['name'] ?? '', style: const TextStyle(fontWeight: FontWeight.bold)), Text('السعة: ${s['capacity'] ?? '-'}', style: const TextStyle(color: Colors.grey, fontSize: 12))])),
+                      if (!widget.isGuest)
+                        IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () async {
+                          await supabase.from('sections').delete().eq('id', s['id']);
+                          loadSections();
+                        }),
+                    ],
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
